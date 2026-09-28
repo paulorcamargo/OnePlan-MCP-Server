@@ -34,10 +34,16 @@ npm run build
 cp .env.example .env     # no Windows: copy .env.example .env
 ```
 
-Depois abra o `.env` e preencha `ONEPLAN_API_KEY` e `ONEPLAN_KEY_NAME`. Os dois formam o Basic auth
-e precisam bater exatamente com o que o OnePlan mostra. **Use a sua própria chave**, criada em
-`my.oneplan.ai`: assim o rastro de quem fez o quê se mantém, e revogar a sua não derruba as outras
-pessoas.
+Depois abra o `.env` e preencha `ONEPLAN_API_KEY` e `ONEPLAN_KEY_NAME`. Os dois formam o Basic
+auth e precisam bater exatamente com o que o OnePlan mostra.
+
+**Peça as suas ao administrador do OnePlan** — a chave de API e o nome do grupo a que ela
+pertence. Cada pessoa usa as próprias: é o que mantém o rastro de quem fez o quê, e o que permite
+revogar o acesso de uma sem derrubar o de todas. Não reaproveite a credencial de outra pessoa, e
+não cole a sua em conversa, ticket ou commit.
+
+A chave é **escopada a um grupo**, e o grupo determina qual acervo você enxerga — por isso o nome
+vem junto com ela, e não é um detalhe de formulário.
 
 O `.env` está no `.gitignore` e não deve ser enviado para o repositório nem colado em conversa.
 
