@@ -566,6 +566,22 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Tool: Inspect a Primavera P6 .xer file
+// ---------------------------------------------------------------------------
+server.tool(
+  "p6_inspect_xer",
+  "Read a Primavera P6 .xer file from disk and return an inventory of it: projects with task and WBS counts and date ranges, dependency totals by type, calendars actually in use, user-defined fields with fill counts and sample values, activity code types, and resources with assignment counts. READ-ONLY — it imports nothing. Use it before any import, because the field mapping into OnePlan differs per file and guessing writes values into the wrong field: the same .xer may carry the client's own enterprise fields under P6 names, two disagreeing sources for one field, cross-project links that have no destination in OnePlan (links exist only within a plan), and 'resources' that are really unit-weight metrics rather than people. The returned `avisos` array flags these. The file path must be local to the machine running this server.",
+  {
+    filePath: z.string().describe("Absolute path to the .xer file on the machine running this server"),
+  },
+  async ({ filePath }) => {
+    const { inventariar } = await import("./xer.js");
+    const inventario = inventariar(filePath);
+    return { content: [{ type: "text", text: JSON.stringify(inventario, null, 2) }] };
+  }
+);
+
+// ---------------------------------------------------------------------------
 // SharePoint / PWA Migration Source (conditional — only if SP_SITE_URL is set)
 // ---------------------------------------------------------------------------
 const SP_SITE_URL = process.env.SP_SITE_URL;
@@ -788,7 +804,9 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
-  const toolCount = SP_SITE_URL ? "36" : "26";
+  // Contagem conferida com `node extrair-ferramentas.mjs`, que le os registros do proprio arquivo.
+  // Ao acrescentar ou remover ferramenta, rode-o de novo e ajuste aqui e na tabela do README.
+  const toolCount = SP_SITE_URL ? "38" : "28";
   console.error(`OnePlan MCP server running on stdio (${toolCount} tools available)`);
   if (!SP_SITE_URL) {
     console.error("Tip: Set SP_SITE_URL to enable SharePoint/PWA migration tools.");
