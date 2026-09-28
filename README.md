@@ -49,27 +49,64 @@ O `.env` está no `.gitignore` e não deve ser enviado para o repositório nem c
 
 ## Configuração por aplicativo
 
+Este é um servidor **stdio local**: ele roda na sua máquina, iniciado pelo aplicativo. Aplicativo
+que roda no navegador, na nuvem, não consegue falar com ele.
+
+| Aplicativo | Funciona? | Onde se configura |
+|---|---|---|
+| Claude Code (terminal, VS Code, app) | sim | `.mcp.json` deste repositório |
+| Claude Desktop | sim | `claude_desktop_config.json` |
+| VS Code (Copilot, modo agente) | sim | `.vscode/mcp.json` ou o próprio `.mcp.json` |
+| Codex CLI · Codex no IDE · Codex app | sim | `~/.codex/config.toml` |
+| Claude na web (claude.ai) | **não** | só conector remoto, por HTTP |
+| ChatGPT na web · Codex na nuvem | **não** | só servidor remoto, por HTTP |
+
+Para os dois últimos não existe passo a passo: seria preciso publicar o servidor num endereço HTTP
+acessível, que é outro trabalho — e exporia a credencial do OnePlan a quem alcançasse esse
+endereço. Enquanto ele for stdio local, a credencial não sai da sua máquina.
+
+**Regra que vale para todos**: fora do Claude Code e do VS Code, use **caminho absoluto**. Os
+outros aplicativos não iniciam o servidor dentro da pasta do projeto, e caminho relativo não
+resolve. E no Windows escreva com **barra normal** (`C:/Users/...`): em JSON, o `\U` de `C:\Users`
+não é escape válido, o arquivo deixa de ser JSON e o servidor simplesmente **não existe** para o
+aplicativo, sem nenhuma mensagem de erro.
+
 ### Claude Code
 
-Não precisa fazer nada: o `.mcp.json` já está no repositório. Ao abrir o projeto, o aplicativo
-pergunta se você aprova o servidor — responda que sim, uma vez.
+Não precisa fazer nada: o `.mcp.json` já está no repositório e usa caminho relativo.
 
-Se as ferramentas `mcp__oneplan__*` não aparecerem, o servidor não subiu. Um `.mcp.json` inválido
-**não carrega e também não aparece na lista de servidores que falharam**, então a ausência das
-ferramentas é o sintoma a procurar. Para ver o erro de verdade:
+1. Abra a pasta do projeto com o Claude Code.
+2. Na primeira vez ele pergunta se você aprova o servidor do projeto. Responda que sim.
+3. Confirme com `/mcp` — o `oneplan` deve aparecer como conectado.
+
+Pela linha de comando, `claude mcp list` mostra o estado de cada servidor. Se você aprovou por
+engano e quer rever, `claude mcp reset-project-choices` limpa as respostas daquele projeto.
+
+Quer o servidor disponível em **todos** os seus projetos, e não só neste? Registre no escopo de
+usuário, com caminho absoluto:
 
 ```bash
-node --env-file=.env dist/index.js < /dev/null
+claude mcp add --scope user oneplan -- node --env-file=/caminho/para/mcp-oneplan/.env /caminho/para/mcp-oneplan/dist/index.js
 ```
 
-Sem credencial ele encerra com `ONEPLAN_API_KEY environment variable is required`. Com credencial,
-ele anuncia `OnePlan MCP server running on stdio (26 tools available)` e encerra em seguida, porque
-o `< /dev/null` fecha a entrada — é o resultado esperado deste teste.
+Os escopos são três e a diferença importa: `local` (padrão) vale só para você neste projeto;
+`project` grava no `.mcp.json` e vai para o Git, para a equipe inteira; `user` vale para todos os
+seus projetos. **Nunca** use `-e ONEPLAN_API_KEY=...` no comando: a chave ficaria escrita em
+`~/.claude.json`, em texto puro. O `--env-file` existe para evitar isso.
 
 ### Claude Desktop
 
-O aplicativo de desktop **não lê o `.mcp.json` do projeto**. Acrescente o bloco abaixo ao seu
-`claude_desktop_config.json`, com o **caminho absoluto** da sua cópia:
+O aplicativo de desktop **não lê o `.mcp.json` do projeto**.
+
+1. Abra o menu **Claude** do sistema (não o de dentro da janela) e escolha **Settings…**
+2. Vá à aba **Developer** e clique em **Edit Config**. Isso abre — ou cria — o arquivo:
+
+   | Sistema | Onde |
+   |---|---|
+   | Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
+   | macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+
+3. Acrescente o bloco abaixo, trocando o caminho pelo da sua cópia:
 
 ```jsonc
 {
@@ -85,17 +122,89 @@ O aplicativo de desktop **não lê o `.mcp.json` do projeto**. Acrescente o bloc
 }
 ```
 
-Use **barra normal** mesmo no Windows: em JSON, `\U` de `C:\Users` não é escape válido, o arquivo
-deixa de ser JSON e o servidor simplesmente não existe para o aplicativo — sem nenhuma mensagem.
+4. **Feche o aplicativo por completo e abra de novo.** Servidor MCP sobe na abertura, não no meio
+   da conversa.
+5. No campo de mensagem, clique no indicador de anexos e conectores, vá em **Connectors >
+   Manage connectors** e confirme que o `oneplan` está lá, com as ferramentas.
 
-O caminho do arquivo de configuração:
+Se não aparecer, o log diz o motivo: `%APPDATA%\Claude\logs\mcp-server-oneplan.log` no Windows,
+`~/Library/Logs/Claude/` no macOS.
 
-| Sistema | Onde |
-|---|---|
-| Windows | `%APPDATA%\Claude\claude_desktop_config.json` |
-| macOS | `~/Library/Application Support/Claude/claude_desktop_config.json` |
+### VS Code (GitHub Copilot, modo agente)
 
-Reinicie o aplicativo depois de salvar — servidor MCP sobe na abertura, não no meio da conversa.
+O VS Code aceita **os dois formatos**, e a diferença é só a chave do topo:
+
+- `.mcp.json` na raiz do projeto — o que já está aqui — usa `mcpServers`;
+- `.vscode/mcp.json` usa `servers`.
+
+Como o `.mcp.json` já existe, abrir esta pasta no VS Code costuma bastar. Passo a passo:
+
+1. Abra a pasta do projeto.
+2. Na paleta de comandos, rode **MCP: Add Server** e escolha o escopo — **Workspace** grava em
+   `.vscode/mcp.json`; **Global** vale para todos os seus projetos (**MCP: Open User
+   Configuration** abre esse arquivo).
+3. Abra o Chat em **modo agente** e confira que as ferramentas do `oneplan` aparecem na lista.
+
+O formato do `.vscode/mcp.json`, se preferir escrever à mão:
+
+```jsonc
+{
+  "servers": {
+    "oneplan": {
+      "command": "node",
+      "args": ["--env-file=.env", "dist/index.js"]
+    }
+  }
+}
+```
+
+O campo `type` só é necessário para servidor HTTP; para stdio, que é o caso, ele é o padrão.
+
+### Codex (CLI, IDE e aplicativo de desktop)
+
+A configuração do Codex é **TOML**, não JSON, e a seção se chama `mcp_servers` (com sublinhado).
+Fica em `~/.codex/config.toml` para valer em tudo, ou em `.codex/config.toml` dentro do projeto.
+
+Pelo comando:
+
+```bash
+codex mcp add oneplan -- node --env-file=/caminho/para/mcp-oneplan/.env /caminho/para/mcp-oneplan/dist/index.js
+```
+
+Ou escrevendo no arquivo:
+
+```toml
+[mcp_servers.oneplan]
+command = "node"
+args = [
+  "--env-file=/caminho/para/mcp-oneplan/.env",
+  "/caminho/para/mcp-oneplan/dist/index.js",
+]
+```
+
+Existe também uma seção `[mcp_servers.oneplan.env]` para declarar variáveis direto no arquivo.
+**Prefira o `--env-file`**: a chave de API no `config.toml` é mais um lugar com credencial em texto
+puro, e um a mais para lembrar de limpar.
+
+O mesmo `config.toml` serve para o Codex no terminal, a extensão de IDE e o aplicativo de desktop.
+**Codex na nuvem e ChatGPT na web não alcançam servidor local** — só servidor remoto por HTTP.
+
+### Quando não aparecer
+
+O sintoma é sempre o mesmo: as ferramentas não existem. Um arquivo de configuração inválido
+**não carrega e também não é reportado como falha**, então a ausência das ferramentas *é* o
+diagnóstico. Rode o servidor à mão para ver o erro de verdade:
+
+```bash
+node --env-file=.env dist/index.js < /dev/null
+```
+
+Sem credencial ele encerra com `ONEPLAN_API_KEY environment variable is required`. Com credencial,
+ele anuncia `OnePlan MCP server running on stdio (28 tools available)` e encerra em seguida, porque
+o `< /dev/null` fecha a entrada — é o resultado esperado deste teste.
+
+Vale conferir também: `node --version` devolve 22 ou mais; a pasta `dist/` existe (senão,
+`npm run build`); e o caminho é absoluto fora do Claude Code e do VS Code.
 
 ## Conferir que funcionou
 
