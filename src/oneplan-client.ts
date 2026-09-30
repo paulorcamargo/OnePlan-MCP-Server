@@ -15,6 +15,15 @@ import { randomUUID } from "node:crypto";
 
 const EMPTY_GUID = "00000000-0000-0000-0000-000000000000";
 
+// Built-in work types, keyed by the first 8 chars of the WorkTypeId.
+// Work items carry only the id, not the name.
+const DEFAULT_WORK_TYPES: Record<string, string> = {
+  e2a5e9dc: "Tasks",
+  e04d627c: "Risks",
+  "92af3dcc": "Issues",
+  "315497d8": "Changes",
+};
+
 export interface ListPlansOptions {
   planTypeId?: string;
   top?: number;
@@ -172,14 +181,15 @@ export class OnePlanClient {
   // -----------------------------------------------------------------------
 
   async listPlans(opts?: ListPlansOptions): Promise<unknown> {
-    const params = new URLSearchParams();
-    if (opts?.planTypeId) params.set("FilterField", "PlannerTypeId");
-    if (opts?.planTypeId) params.set("FilterValue", opts.planTypeId);
-    if (opts?.top) params.set("$top", String(opts.top));
-    if (opts?.skip) params.set("$skip", String(opts.skip));
-
-    const qs = params.toString();
-    return this.request("GET", `/api/workplan${qs ? `?${qs}` : ""}`);
+    // The API ignores $top/$skip and returns 500 on FilterField/FilterValue,
+    // so filter and paginate here.
+    let plans = await this.request<any[]>("GET", "/api/workplan");
+    if (opts?.planTypeId) {
+      const typeId = opts.planTypeId.toLowerCase();
+      plans = plans.filter((p) => p.PlannerTypeId?.toLowerCase() === typeId);
+    }
+    const skip = opts?.skip ?? 0;
+    return plans.slice(skip, skip + (opts?.top ?? 50));
   }
 
   async getPlan(planId: string): Promise<unknown> {
@@ -317,8 +327,35 @@ export class OnePlanClient {
   // Financials via /api/cost/{planId}
   // -----------------------------------------------------------------------
 
-  async getFinancials(planId: string): Promise<unknown> {
-    return this.request("GET", `/api/workplan/financials?planId=${planId}`);
+  async listCostTypes(): Promise<Array<{ id: string; Name: string }>> {
+    return this.request("GET", "/api/portfolio/costtypes");
+  }
+
+  /**
+   * Read a plan's cost grid for one cost type (same call the Cost Planner makes).
+   * Values come back as `{costTypeIdWithoutDashes}_{period}` keys plus `_Total`,
+   * and only for periods that have a value.
+   */
+  async getCostGrid(
+    planId: string,
+    costTypeId: string,
+    start: string,
+    end: string,
+    zoom = 2
+  ): Promise<{ children?: unknown[] }> {
+    const params = new URLSearchParams({
+      Zoom: String(zoom),
+      Start: start,
+      End: end,
+      CostType: costTypeId,
+      Rate: "",
+      CompareToType: EMPTY_GUID,
+      ShowHidden: "false",
+      GroupBy: "",
+      AdditionalCostTypes: "",
+      CustomPeriods: "",
+    });
+    return this.request("GET", `/api/cost/${planId}?${params}`);
   }
 
   async upsertCostEntry(
@@ -659,13 +696,14 @@ export class OnePlanClient {
     const typeMap = new Map<string, Record<string, unknown>>();
     for (const plan of plans) {
       try {
-        const items = await this.request<any[]>("GET", `/api/workplan/${plan.Id}/tasks`);
+        // Plans come back with a lowercase `id`
+        const items = await this.request<any[]>("GET", `/api/workplan/${plan.id ?? plan.Id}/tasks`);
         if (!Array.isArray(items)) continue;
         for (const item of items) {
           if (item.WorkTypeId && !typeMap.has(item.WorkTypeId)) {
             typeMap.set(item.WorkTypeId, {
               Id: item.WorkTypeId,
-              Name: item.WorkTypeName ?? item.WorkTypeId,
+              Name: item.WorkTypeName ?? DEFAULT_WORK_TYPES[item.WorkTypeId.slice(0, 8)] ?? item.WorkTypeId,
             });
           }
         }

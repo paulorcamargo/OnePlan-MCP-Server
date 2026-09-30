@@ -46,12 +46,17 @@ const server = new McpServer({
   version: "1.0.0",
 });
 
+const EMPTY_GUID = "00000000-0000-0000-0000-000000000000";
+
+// Plan fields shown in the list_plans summary, resolved to their choice labels
+const PLAN_STATUS_FIELDS = ["State", "Status", "StatusdoProjeto"];
+
 // ---------------------------------------------------------------------------
 // Tool: List Plans
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_list_plans",
-  "List plans (projects, ideas, programs) from OnePlan. Optionally filter by plan type.",
+  "List plans (projects, ideas, programs) from OnePlan. Optionally filter by plan type. Returns a summary per plan (Id, Name, PlannerTypeId, PortfolioParentId, Archived and the status fields with their labels); use oneplan_get_plan for all fields.",
   {
     planTypeId: z
       .string()
@@ -72,7 +77,30 @@ server.tool(
       .describe("Number of plans to skip for pagination"),
   },
   async ({ planTypeId, top, skip }) => {
-    const data = await client.listPlans({ planTypeId, top, skip });
+    const plans = (await client.listPlans({ planTypeId, top, skip })) as any[];
+
+    // Status fields hold choice GUIDs; look up their labels once
+    const statusChoices = new Map<string, Record<string, string>>();
+    try {
+      for (const f of (await client.listFields("plan")) as any[]) {
+        if (PLAN_STATUS_FIELDS.includes(f.InternalName)) statusChoices.set(f.InternalName, f.Choices ?? {});
+      }
+    } catch { /* fall back to raw GUIDs */ }
+
+    const data = plans.map((p) => {
+      const summary: Record<string, unknown> = {
+        Id: p.id,
+        Name: p.Name,
+        PlannerTypeId: p.PlannerTypeId,
+        PortfolioParentId: p.PortfolioParentId === EMPTY_GUID ? null : p.PortfolioParentId,
+        Archived: p.Archived,
+      };
+      for (const field of PLAN_STATUS_FIELDS) {
+        const value = p.Fields?.[field];
+        if (value != null) summary[field] = statusChoices.get(field)?.[value] ?? value;
+      }
+      return summary;
+    });
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
@@ -403,12 +431,69 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_get_financials",
-  "Fetch the Financial Plan (budgets, forecasts, and actuals) attached to a specific Plan GUID.",
+  "Read a plan's Cost Planner grid (budget, forecast, actuals and the other cost types) by cost category and period. Without costTypeId it reads every cost type and returns only those that have values. Rows and periods with no value are left out.",
   {
     planId: z.string().describe("The GUID of the Plan"),
+    costTypeId: z
+      .string()
+      .optional()
+      .describe("Cost type GUID (from /api/portfolio/costtypes, e.g. Orçamento). Omit to read all cost types"),
+    start: z.string().optional().describe("First date, YYYY-MM-DD (default 2020-01-01)"),
+    end: z.string().optional().describe("Last date, YYYY-MM-DD (default 2035-12-31)"),
+    zoom: z.number().optional().describe("Period size: 2 = monthly (default)"),
   },
-  async ({ planId }) => {
-    const data = await client.getFinancials(planId);
+  async ({ planId, costTypeId, start = "2020-01-01", end = "2035-12-31", zoom = 2 }) => {
+    const allTypes = await client.listCostTypes();
+    const types = costTypeId
+      ? allTypes.filter((t) => t.id.toLowerCase() === costTypeId.toLowerCase())
+      : allTypes;
+    if (types.length === 0) {
+      return { content: [{ type: "text", text: `Cost type ${costTypeId} not found.` }], isError: true };
+    }
+
+    const withValues: unknown[] = [];
+    const empty: string[] = [];
+    for (const type of types) {
+      const grid = await client.getCostGrid(planId, type.id, start, end, zoom);
+      const prefix = type.id.replace(/-/g, "") + "_";
+      const rows: Record<string, unknown>[] = [];
+      let total = 0;
+
+      // Walk the category tree; keep rows that carry at least one value
+      const walk = (nodes: any[], path: string[], depth: number) => {
+        for (const node of nodes ?? []) {
+          const nodePath = depth === 0 ? path : [...path, node.Name];
+          const periods: Record<string, number> = {};
+          let rowTotal: number | undefined;
+          for (const [key, value] of Object.entries(node)) {
+            if (!key.startsWith(prefix) || typeof value !== "number" || value === 0) continue;
+            const period = key.slice(prefix.length);
+            if (period === "Total") rowTotal = value;
+            else periods[period] = value;
+          }
+          if (depth === 0) total = rowTotal ?? 0; // "Plan Total" row
+          else if (rowTotal !== undefined || Object.keys(periods).length > 0) {
+            rows.push({
+              Category: nodePath.join(" > "),
+              CostCategoryId: node.CostCategoryId,
+              ...(node.DetailRow ? { DetailRow: true } : {}),
+              Total: rowTotal ?? 0,
+              Periods: periods,
+            });
+          }
+          walk(node.children, nodePath, depth + 1);
+        }
+      };
+      walk(grid.children ?? [], [], 0);
+
+      if (rows.length > 0 || total !== 0) {
+        withValues.push({ CostTypeId: type.id, CostType: type.Name, Total: total, Rows: rows });
+      } else {
+        empty.push(`${type.Name} (${type.id})`);
+      }
+    }
+
+    const data = { planId, start, end, costTypes: withValues, costTypesWithoutValues: empty };
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
