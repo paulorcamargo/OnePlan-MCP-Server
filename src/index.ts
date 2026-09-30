@@ -195,13 +195,14 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_approve_step",
-  "Approve a plan's current workflow step.",
+  "Approve or reject a stage-gate approval task. OnePlan gates a workflow step through an approval task (work type 'Aprovações'); find its Id with oneplan_list_workplan_items.",
   {
-    planId: z.string().describe("GUID of the plan"),
-    comment: z.string().optional().describe("Approval comment"),
+    taskId: z.string().describe("GUID of the approval task"),
+    comment: z.string().optional().describe("Approval or rejection reason"),
+    reject: z.boolean().optional().describe("true to reject instead of approve"),
   },
-  async ({ planId, comment }) => {
-    const data = await client.approveStep(planId, comment);
+  async ({ taskId, comment, reject }) => {
+    const data = await client.decideApprovalTask(taskId, !reject, comment);
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
@@ -211,10 +212,15 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_list_plan_types",
-  "List all available plan types and their GUIDs in OnePlan.",
+  "List all plan types in OnePlan with their GUID, name and parent type. Use oneplan_get_plan_type for a type's full definition.",
   {},
   async () => {
-    const data = await client.listPlanTypes();
+    const data = (await client.listPlanTypes()).map((t) => ({
+      Id: t.id,
+      Name: t.Name,
+      ParentTypeId: t.ParentTypeId === EMPTY_GUID ? null : t.ParentTypeId,
+      Hidden: t.Hidden,
+    }));
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
@@ -334,7 +340,24 @@ server.tool(
       ),
   },
   async ({ planId, payload }) => {
-    const data = await client.updateWorkPlanItem(planId, payload);
+    const { Id, id, Name, WorkTypeId, ...fields } = payload as Record<string, any>;
+    const itemId = Id ?? id;
+    let data: unknown;
+    if (itemId) {
+      data = await client.updateWorkItem(planId, itemId, {
+        ...fields,
+        ...(Name !== undefined ? { Name } : {}),
+        ...(WorkTypeId !== undefined ? { WorkTypeId } : {}),
+      });
+    } else {
+      if (!Name || !WorkTypeId) {
+        return {
+          content: [{ type: "text", text: "To create an item, payload needs Name and WorkTypeId (see oneplan_list_work_types)." }],
+          isError: true,
+        };
+      }
+      data = await client.createWorkItem(planId, WorkTypeId, Name, fields);
+    }
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
@@ -365,8 +388,8 @@ server.tool(
   "Insert or update a monthly cost entry in a plan's financial grid. Use this to set Budget, Actuals, or Forecast for a specific month and cost category.",
   {
     planId: z.string().describe("The GUID of the Plan"),
-    costTypeId: z.string().describe("CostType GUID: Budget=d44da584, Actuals=0783f20d, Forecast=3a1769d8"),
-    costCategoryId: z.string().describe("CostCategory GUID (e.g. Developer=062705df, Materials=1774eed6)"),
+    costTypeId: z.string().describe("Cost type GUID (Budget, Actuals, Forecast…). The ids differ per tenant: read them with oneplan_get_financials"),
+    costCategoryId: z.string().describe("Leaf cost category GUID. The ids differ per tenant and per cost type: read them with oneplan_get_financials"),
     date: z.string().describe("First day of the month in YYYY-MM-DD format (e.g. 2026-01-01)"),
     value: z.number().describe("The dollar amount for this cost entry"),
     zoom: z.number().optional().describe("Zoom level (2 = monthly, default)"),
@@ -400,15 +423,29 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_list_resources",
-  "Fetch the list of users or generic resources in the OnePlan organization directory. Returns emails, Ids, and basic info so you can assign items to people.",
+  "Fetch the users and generic resources in the OnePlan directory: Id, UserId, name, email, job title, role and status, so you can assign items to people.",
   {},
   async () => {
-    let data = await client.listResources() as any[];
-    // Limiting to prevent blowing up the LLM payload window if there are 1000s
-    if (data && data.length > 50) {
-      data = data.slice(0, 50);
-      data.push({ __note: `List truncated to 50 resources. There are more people in this directory.` } as any);
-    }
+    const resources = (await client.listResources()) as any[];
+
+    // Role holds a choice GUID; look up its label
+    let roles: Record<string, string> = {};
+    try {
+      const fields = (await client.listFields("resource")) as any[];
+      roles = fields.find((f) => f.InternalName === "Role")?.Choices ?? {};
+    } catch { /* fall back to the raw GUID */ }
+
+    const data = resources.map((r) => ({
+      Id: r.id,
+      UserId: r.userid,
+      Name: r.name,
+      Email: r.Fields?.mail ?? r.Fields?.userPrincipalName ?? null,
+      JobTitle: r.Fields?.jobTitle ?? null,
+      Role: r.Fields?.Role ? roles[r.Fields.Role] ?? r.Fields.Role : null,
+      Generic: r.Generic,
+      Inactive: r.Inactive,
+      CanLogin: r.CanLogin,
+    }));
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
@@ -539,13 +576,30 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_get_audit_logs",
-  "Fetch intelligent audit logs to figure out who changed data, when, and what the previous values were.",
+  "Read the audit trail (who changed what, when, and the previous value), the same data as OnePlan's Audit window. Returns at most 100 entries. An empty list can also mean auditing is not enabled for the tenant.",
   {
-    planId: z.string().optional().describe("Optionally pass the plan GUID to only fetch audits for that plan"),
+    planId: z.string().optional().describe("Plan GUID to limit the audit to one plan"),
+    area: z
+      .enum(["plan", "tasks", "financials"])
+      .optional()
+      .describe("'plan' = plan fields (default), 'tasks' = work items, 'financials' = cost planner"),
+    start: z.string().optional().describe("First date, YYYY-MM-DD (default: 30 days ago)"),
+    end: z.string().optional().describe("Last date, YYYY-MM-DD (default: tomorrow)"),
+    userId: z.string().optional().describe("Only changes made by this user GUID"),
+    field: z.string().optional().describe("Only changes to this field InternalName"),
   },
-  async ({ planId }) => {
-    const data = await client.getAuditLogs(planId) as any[];
-    return { content: [{ type: "text", text: JSON.stringify(data? data.slice(0, 30) : data, null, 2) }] };
+  async ({ planId, area = "plan", start, end, userId, field }) => {
+    const day = 24 * 60 * 60 * 1000;
+    const isoDate = (ms: number) => new Date(ms).toISOString().slice(0, 10);
+    const data = await client.getAuditLogs({
+      area,
+      planId,
+      start: start ?? isoDate(Date.now() - 30 * day),
+      end: end ?? isoDate(Date.now() + day),
+      userId,
+      field,
+    });
+    return { content: [{ type: "text", text: JSON.stringify(data.slice(0, 100), null, 2) }] };
   }
 );
 
@@ -554,10 +608,12 @@ server.tool(
 // ---------------------------------------------------------------------------
 server.tool(
   "oneplan_check_integrations",
-  "Fetch the status of background integrations like Jira, ADO, ServiceNow, or OneConnect flows.",
-  {},
-  async () => {
-    const data = await client.checkIntegrations();
+  "List the integrations configured in OnePlan (Planner, Jira, Azure DevOps, Teams, SharePoint…). Pass planId to also get each integration's sync status for that plan.",
+  {
+    planId: z.string().optional().describe("Plan GUID to check the sync status for"),
+  },
+  async ({ planId }) => {
+    const data = await client.checkIntegrations(planId);
     return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }] };
   }
 );
@@ -632,8 +688,10 @@ server.tool(
     fieldIdentifier: z.string().describe("The field's GUID (Id) or its exact DisplayName"),
   },
   async ({ scope, fieldIdentifier }) => {
-    const data = await client.deleteField(fieldIdentifier, scope);
-    return { content: [{ type: "text", text: JSON.stringify({ deleted: fieldIdentifier, scope, result: data }, null, 2) }] };
+    // The API answers with the whole remaining field list; deleteField already
+    // re-reads it to confirm the removal, so report just the outcome.
+    await client.deleteField(fieldIdentifier, scope);
+    return { content: [{ type: "text", text: JSON.stringify({ deleted: fieldIdentifier, scope, confirmed: true }, null, 2) }] };
   }
 );
 

@@ -15,14 +15,26 @@ import { randomUUID } from "node:crypto";
 
 const EMPTY_GUID = "00000000-0000-0000-0000-000000000000";
 
-// Built-in work types, keyed by the first 8 chars of the WorkTypeId.
-// Work items carry only the id, not the name.
-const DEFAULT_WORK_TYPES: Record<string, string> = {
-  e2a5e9dc: "Tasks",
-  e04d627c: "Risks",
-  "92af3dcc": "Issues",
-  "315497d8": "Changes",
+// Integration.SystemType values, as the OnePlan web app labels them
+const INTEGRATION_SYSTEMS: Record<number, string> = {
+  0: "Project for the Web",
+  1: "Jira",
+  2: "Azure DevOps",
+  3: "Teams",
+  4: "Planner",
+  5: "Project for the Web (new)",
+  6: "SharePoint",
+  8: "Aha!",
+  10: "Monday",
+  11: "TOPdesk",
+  12: "Asana",
+  13: "Wrike",
+  14: "Trello",
+  15: "Businessmap",
 };
+
+/** Tabs of the Audit window, each backed by POST /api/audit/{area} */
+export type AuditArea = "plan" | "tasks" | "financials";
 
 export interface ListPlansOptions {
   planTypeId?: string;
@@ -201,9 +213,6 @@ export class OnePlanClient {
       Name: payload.title,
       PlanType: payload.planTypeId,
     };
-    if (payload.parentId) {
-        workPlan.ParentId = payload.parentId;
-    }
     if (payload.description || payload.properties) {
       const fields: Record<string, unknown> = {};
       if (payload.description) fields.Description = payload.description;
@@ -211,7 +220,14 @@ export class OnePlanClient {
       workPlan.Fields = fields;
     }
 
-    return this.request("POST", "/api/workplan", { WorkPlan: workPlan });
+    const created = await this.request<any>("POST", "/api/workplan", { WorkPlan: workPlan });
+
+    // The create call ignores any parent, so the plan lands at the top of the
+    // portfolio; move it with the same call the UI uses.
+    if (payload.parentId) {
+      return this.changePlanParent(created.id, payload.planTypeId, payload.parentId);
+    }
+    return created;
   }
 
   async updatePlan(
@@ -248,10 +264,22 @@ export class OnePlanClient {
     return this.request("POST", `/api/workplan/${planId}/step?StepId=${stepId}`, body);
   }
 
-  async approveStep(planId: string, comment?: string): Promise<unknown> {
-    const body: Record<string, unknown> = {};
-    if (comment) body.Comment = comment;
-    return this.request("POST", `/api/workplan/${planId}/step/approve`, body);
+  /**
+   * Stage gates are approved through their approval task (work type
+   * "Aprovações"), not through the plan: there is no /step/approve route.
+   */
+  async decideApprovalTask(taskId: string, approve: boolean, reason = ""): Promise<unknown> {
+    return approve
+      ? this.request("POST", "/api/workplan/approvals/task/approve", {
+          TaskId: taskId,
+          ApprovalReason: reason,
+          IsTeam: false,
+          TeamId: EMPTY_GUID,
+        })
+      : this.request("POST", "/api/workplan/approvals/task/reject", {
+          TaskId: taskId,
+          RejectionReason: reason,
+        });
   }
 
   // -----------------------------------------------------------------------
@@ -306,9 +334,33 @@ export class OnePlanClient {
       payload, this.hasCookieAuth);
   }
 
-  // Legacy alias for backward compatibility
-  async updateWorkPlanItem(planId: string, payload: any): Promise<unknown> {
-    return this.request("POST", `/api/workplan/${planId}/tasks`, [payload]);
+  /**
+   * Update an existing work item through the same Bryntum sync call used to
+   * create one (`updated` instead of `added`). The old POST
+   * /api/workplan/{planId}/tasks path answers 500 (NullReference in AddTask).
+   */
+  async updateWorkItem(
+    planId: string,
+    itemId: string,
+    fields: Record<string, unknown>
+  ): Promise<unknown> {
+    let workTypeId = fields.WorkTypeId as string | undefined;
+    if (!workTypeId) {
+      const items = await this.request<any[]>("GET", `/api/workplan/${planId}/tasks`);
+      workTypeId = items.find((i) => i.id === itemId || i.Id === itemId)?.WorkTypeId;
+      if (!workTypeId) {
+        throw new Error(`Work item ${itemId} not found in plan ${planId}.`);
+      }
+    }
+    const payload = {
+      type: "sync",
+      requestId: Date.now(),
+      revision: 0,
+      tasks: { added: [], updated: [{ ...fields, Id: itemId }] },
+    };
+    return this.request("POST",
+      `/api/basegrid/${planId}/gantt?WorkTypeId=${workTypeId}`,
+      payload, this.hasCookieAuth);
   }
 
   // -----------------------------------------------------------------------
@@ -419,23 +471,59 @@ export class OnePlanClient {
   // Admin / Audit / Integrations
   // -----------------------------------------------------------------------
 
-  async getAuditLogs(planId?: string): Promise<unknown> {
-    // If planId is provided, fetch specific audits, else global audit
-    const endpoint = planId ? `/api/audit/plan/${planId}` : `/api/audit`;
-    try {
-        return await this.request("GET", endpoint);
-    } catch (e) {
-        // Fallback for some tenants
-        return this.request("GET", `/api/workplan/${planId}/audit`);
+  /**
+   * Query the audit trail, as the Audit window does: a POST carrying the
+   * filters as form fields. It reads only.
+   */
+  async getAuditLogs(opts: {
+    area: AuditArea;
+    planId?: string;
+    start: string;
+    end: string;
+    userId?: string;
+    field?: string;
+  }): Promise<unknown[]> {
+    const form = new URLSearchParams({
+      DateBetweenStart: opts.start,
+      DateBetweenEnd: opts.end,
+      HourOffset: String(new Date().getTimezoneOffset()),
+    });
+    if (opts.planId) form.set("PlanId", opts.planId);
+    if (opts.userId) form.set("UserId", opts.userId);
+    if (opts.field) form.set("Fields", opts.field);
+
+    const res = await fetch(`${this.baseUrl}/api/audit/${opts.area}`, {
+      method: "POST",
+      headers: {
+        ...this.headers(),
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    });
+    if (!res.ok) {
+      throw new Error(`OnePlan API error ${res.status} ${res.statusText}: ${await res.text()}`);
     }
+    return (await res.json()) as unknown[];
   }
 
-  async checkIntegrations(): Promise<unknown> {
-    try {
-      return await this.request("GET", "/api/integrations");
-    } catch (e) {
-      return this.request("GET", "/api/integrationevents");
+  /** Integrations configured in the tenant, plus their sync state for one plan. */
+  async checkIntegrations(planId?: string): Promise<unknown> {
+    const integrations = await this.request<any[]>("GET", "/api/integration");
+    const result = [];
+    for (const integration of integrations) {
+      const entry: Record<string, unknown> = {
+        ...integration,
+        System: INTEGRATION_SYSTEMS[integration.SystemType] ?? `SystemType ${integration.SystemType}`,
+      };
+      if (planId) {
+        entry.PlanStatus = await this.request(
+          "GET",
+          `/api/integration/status?PlanId=${planId}&IntegrationId=${integration.Id}`
+        );
+      }
+      result.push(entry);
     }
+    return result;
   }
 
   // -----------------------------------------------------------------------
@@ -679,60 +767,32 @@ export class OnePlanClient {
   // Work Types
   // -----------------------------------------------------------------------
 
-  /**
-   * List all work types (Tasks, Risks, Issues, Changes, and any custom types).
-   * Tries the dedicated /api/worktype endpoint first; falls back to extracting
-   * unique WorkTypeIds from a sample of work items across plans.
-   */
+  /** Work types (Tasks, Risks, Issues, Changes and custom ones) from the tenant config. */
   async listWorkTypes(): Promise<unknown[]> {
-    try {
-      const data = await this.request<unknown[]>("GET", "/api/worktype");
-      if (Array.isArray(data) && data.length > 0) return data;
-    } catch {
-      // endpoint may not exist on all tenants — fall through to fallback
-    }
-    // Fallback: derive work types from existing work items
-    const plans = (await this.request<any[]>("GET", "/api/workplan")).slice(0, 10);
-    const typeMap = new Map<string, Record<string, unknown>>();
-    for (const plan of plans) {
-      try {
-        // Plans come back with a lowercase `id`
-        const items = await this.request<any[]>("GET", `/api/workplan/${plan.id ?? plan.Id}/tasks`);
-        if (!Array.isArray(items)) continue;
-        for (const item of items) {
-          if (item.WorkTypeId && !typeMap.has(item.WorkTypeId)) {
-            typeMap.set(item.WorkTypeId, {
-              Id: item.WorkTypeId,
-              Name: item.WorkTypeName ?? DEFAULT_WORK_TYPES[item.WorkTypeId.slice(0, 8)] ?? item.WorkTypeId,
-            });
-          }
-        }
-      } catch { /* skip plans with no items */ }
-    }
-    return Array.from(typeMap.values());
+    const config = await this.request<{ WorkTypes?: any[] }>("GET", "/api/config");
+    return (config.WorkTypes ?? []).map((w) => ({
+      Id: w.Id,
+      Name: w.Name,
+      Description: w.Description,
+      ListType: w.ListType,
+      PlanTypes: w.PlanTypes,
+    }));
   }
 
   // -----------------------------------------------------------------------
   // Plan Types
   // -----------------------------------------------------------------------
 
-  async listPlanTypes(): Promise<unknown> {
-    // OnePlan doesn't have a dedicated PlanTypes endpoint.
-    // We derive plan types from the workplan list by extracting unique PlannerTypeId values.
-    const plans = (await this.request("GET", "/api/workplan")) as Array<{ PlannerTypeId?: string; Fields?: Record<string, unknown> }>;
-    const typeMap = new Map<string, string>();
-    for (const p of plans) {
-      if (p.PlannerTypeId && !typeMap.has(p.PlannerTypeId)) {
-        typeMap.set(p.PlannerTypeId, p.PlannerTypeId);
-      }
-    }
-    return Array.from(typeMap.entries()).map(([id]) => ({ Id: id }));
+  /** Full plan type definitions (sections, steps, security…), ~5 KB each. */
+  async listPlanTypes(): Promise<any[]> {
+    return this.request("GET", "/api/portfolio/plantypes");
   }
 
   async getPlanType(identifier: string): Promise<unknown> {
-    const types = (await this.listPlanTypes()) as Array<{ Id: string }>;
+    const wanted = identifier.toLowerCase();
+    const types = await this.listPlanTypes();
     const match = types.find(
-      (t) => t.Id.toLowerCase() === identifier.toLowerCase()
+      (t) => t.id?.toLowerCase() === wanted || t.Name?.toLowerCase() === wanted
     );
 
     if (!match) {

@@ -15,12 +15,15 @@ com o OnePlan pela API REST com a **sua** credencial.
 
 Dois pontos que não têm volta no OnePlan:
 
-- **recurso criado não é deletável nem inativável** — não existe rota para desfazer;
+- **recurso criado não é deletável nem inativável**: não existe rota para desfazer;
 - **campo de plano não é deletável** (campo de tarefa é).
 
-O servidor **não** valida em qual tenant você está antes de escrever. Confira com
-`oneplan_list_plans` — o `ConfigId` das linhas identifica o grupo — antes de qualquer criação ou
-alteração.
+Também não há ferramenta para apagar plano nem item de trabalho. O que for criado por engano sai
+pela interface.
+
+O servidor **não** valida em qual tenant você está antes de escrever. Antes de qualquer criação ou
+alteração, confira os nomes com `oneplan_list_plans` e o `ConfigId` (que identifica o grupo) com
+`oneplan_get_plan`.
 
 ## Instalação
 
@@ -208,11 +211,13 @@ Vale conferir também: `node --version` devolve 22 ou mais; a pasta `dist/` exis
 
 ## Conferir que funcionou
 
-Peça a lista de planos (`oneplan_list_plans`) e confira se o `ConfigId` é o do seu grupo.
+Peça a lista de planos (`oneplan_list_plans`) e confira os nomes; o `ConfigId` do grupo aparece
+no `oneplan_get_plan` de qualquer um deles.
 
-Duas coisas que economizam tempo: essa ferramenta **ignora o parâmetro `top`** e devolve o acervo
-inteiro, o que pode ser alguns MB; e o feed OData do OnePlan **ignora `$filter`, `$select`,
-`$skip` e `$top`**, paginando só por `odata.nextLink` — não confie em filtro feito pela URL.
+A API do OnePlan **ignora `$top` e `$skip`** e dá erro 500 quando se filtra pela URL, sempre
+devolvendo o acervo inteiro (alguns MB). Por isso o `oneplan_list_plans` busca tudo e filtra e
+pagina no próprio servidor. O feed OData também **ignora `$filter`, `$select`, `$skip` e `$top`**,
+paginando só por `odata.nextLink`. Não confie em filtro feito pela URL.
 
 ## As ferramentas
 
@@ -224,30 +229,32 @@ mostra, o código manda.
 
 | Ferramenta | O que faz |
 |---|---|
-| `oneplan_list_plans` | Lista planos (projetos, ideias, programas), com filtro opcional por tipo. |
-| `oneplan_get_plan` | Detalha um plano pelo id. É por aqui que vêm os campos personalizados: a listagem não os traz. |
-| `oneplan_create_plan` | Cria um plano. |
+| `oneplan_list_plans` | Lista planos (projetos, ideias, programas), com filtro opcional por tipo e paginação (`top`, padrão 50; `skip`). Devolve um **resumo** por plano: id, nome, tipo, pai, arquivado e os campos de status (Estado, Status, Status do Projeto) já com o rótulo da opção. |
+| `oneplan_get_plan` | Detalha um plano pelo id, com todos os campos, inclusive os personalizados. |
+| `oneplan_create_plan` | Cria um plano. A API ignora o pai na criação, então, quando você passa `parentId`, o servidor cria e em seguida move o plano para lá. |
 | `oneplan_update_plan` | Altera as propriedades de um plano existente. |
 | `oneplan_change_plan_parent` | Move o plano para outro portfólio ou programa. |
-| `oneplan_list_plan_types` | Lista os tipos de plano e seus GUIDs. |
-| `oneplan_get_plan_type` | Detalha um tipo de plano, por nome ou GUID. |
+| `oneplan_list_plan_types` | Lista os tipos de plano com GUID, nome e tipo pai. |
+| `oneplan_get_plan_type` | Traz a definição completa de um tipo de plano (seções, etapas, segurança), por nome ou GUID. |
 
 ### Fluxo de aprovação
 
 | Ferramenta | O que faz |
 |---|---|
-| `oneplan_list_steps` | Lista as etapas de fluxo disponíveis para um plano. |
-| `oneplan_update_step` | Move o plano para frente ou para trás no fluxo. |
-| `oneplan_approve_step` | Aprova a etapa atual. |
+| `oneplan_list_steps` | Lista o histórico de etapas do fluxo de um plano. |
+| `oneplan_update_step` | Move o plano para outra etapa do fluxo. Só tem efeito se o tipo do plano tiver etapas configuradas. |
+| `oneplan_approve_step` | Aprova ou rejeita (`reject: true`) uma **tarefa de aprovação**. No OnePlan, a etapa com portão é liberada pela tarefa de aprovação que ela gera (tipo "Aprovações"), não pelo plano. Ache o id com `oneplan_list_workplan_items`. |
 
 ### Cronograma e itens de trabalho
 
 | Ferramenta | O que faz |
 |---|---|
-| `oneplan_list_work_types` | Lista os tipos de trabalho (Tarefas, Riscos, Problemas, Mudanças e os personalizados) com o `WorkTypeId` de cada um. Consulte antes de criar item. |
+| `oneplan_list_work_types` | Lista os tipos de trabalho da configuração do tenant (Tarefas, Backlog, Riscos, Problemas, Mudanças, Aprovações e os personalizados), com o `WorkTypeId` de cada um. Consulte antes de criar item. |
 | `oneplan_list_workplan_items` | Lista os itens de um plano, com o `WorkTypeId` que identifica o tipo. |
 | `oneplan_create_work_item` | Cria item pelo protocolo de sincronismo do Gantt. Exige `WorkTypeId`. |
-| `oneplan_upsert_workplan_item` | Cria ou atualiza item genérico na área de trabalho do plano. |
+| `oneplan_upsert_workplan_item` | Com `Id` no payload, altera o item; sem `Id`, cria (exige `Name` e `WorkTypeId`). As duas operações passam pelo sincronismo do Gantt. |
+
+Não há ferramenta para **apagar** item de trabalho. Item criado por engano sai pela interface.
 
 ### Campos
 
@@ -257,30 +264,35 @@ mostra, o código manda.
 | `oneplan_create_field` | Cria campo. O padrão é lista; você passa os rótulos e os GUIDs são gerados. **Campo de plano não pode ser apagado depois** (só pela interface); campo de tarefa pode. Na dúvida, crie no escopo de tarefa. |
 | `oneplan_update_field_name` | Troca o nome de exibição. O nome interno **não muda** — ele é derivado na criação, e é o que os relatórios usam. |
 | `oneplan_upsert_field_choice` | Acrescenta opção a um campo de **plano**, preservando as existentes. |
-| `oneplan_delete_field` | Apaga campo de tarefa ou de recurso. Recusa campo de plano, que não tem rota de exclusão, em vez de fingir que apagou. |
+| `oneplan_delete_field` | Apaga campo de tarefa ou de recurso e confirma relendo a lista. Recusa campo de plano, que não tem rota de exclusão, em vez de fingir que apagou. |
 
 ### Financeiro
 
 | Ferramenta | O que faz |
 |---|---|
-| `oneplan_get_financials` | Lê o plano financeiro: orçamento, previsão e realizado. |
-| `oneplan_upsert_financials` | Empurra dados financeiros externos para o plano — a ponte para integração com ERP. |
-| `oneplan_upsert_cost_entry` | Insere ou atualiza um lançamento mensal na grade de custos, por mês e categoria. |
+| `oneplan_get_financials` | Lê a grade do planejador de custos (a aba Financials): valor por tipo de custo, categoria e mês, com total. Sem `costTypeId`, lê todos os tipos de custo e devolve só os que têm valor; `start`, `end` e `zoom` ajustam o período. |
+| `oneplan_upsert_financials` | Grava na mesma grade de custos com um payload livre. É a ponte para integração com ERP. |
+| `oneplan_upsert_cost_entry` | Insere ou atualiza um lançamento mensal na grade de custos, por tipo de custo, categoria e mês. |
+
+Os ids de tipo de custo e de categoria **mudam de tenant para tenant**. Os exemplos na descrição
+das ferramentas não valem para o seu. Leia os seus com `oneplan_get_financials`, que mostra só as
+linhas com valor, ou pelas rotas `/api/portfolio/costtypes` e `/api/cost/categories`. Há nomes repetidos (dois "Orçamento", dois "Custo Real"), cada um
+com suas categorias, então identifique pelo id.
 
 ### Recursos e pessoas
 
 | Ferramenta | O que faz |
 |---|---|
-| `oneplan_list_resources` | Lista usuários e recursos genéricos do diretório. |
-| `oneplan_create_resource` | Cria usuário ou recurso genérico. **Não tem desfazer**: recurso no OnePlan não é deletável nem inativável. |
-| `oneplan_get_my_tasks` | Traz as tarefas atribuídas a você, o "Meu Trabalho". |
+| `oneplan_list_resources` | Lista usuários e recursos genéricos do diretório, com id, nome, e-mail, cargo, função (já com o rótulo) e situação. |
+| `oneplan_create_resource` | ⚠️ **Não funciona hoje**: a API responde 500 (`AddResource`) ao formato que a ferramenta envia, e a rota certa ainda não foi mapeada. Se voltar a funcionar, lembre que **não tem desfazer**: recurso no OnePlan não é deletável nem inativável. |
+| `oneplan_get_my_tasks` | Traz as tarefas atribuídas a quem está autenticado, o "Meu Trabalho". Com a chave de API volta vazio, porque a chave não é uma pessoa. |
 
 ### Administração
 
 | Ferramenta | O que faz |
 |---|---|
-| `oneplan_get_audit_logs` | Quem mudou o quê, quando, e qual era o valor anterior. |
-| `oneplan_check_integrations` | Estado das integrações de fundo (Jira, ADO, ServiceNow, OneConnect). |
+| `oneplan_get_audit_logs` | Consulta a trilha de auditoria (quem mudou o quê, quando, e o valor anterior), como a janela de Auditoria do OnePlan. Filtra por `area` (`plan`, `tasks`, `financials`), período, usuário e campo. Lista vazia pode significar auditoria desligada no tenant. |
+| `oneplan_check_integrations` | Lista as integrações configuradas (Planner, Jira, Azure DevOps, Teams, SharePoint…). Com `planId`, mostra também o estado de sincronização de cada uma naquele plano. |
 
 ### Primavera P6
 
@@ -319,10 +331,36 @@ Só aparecem com `SP_SITE_URL` configurado.
 | `ONEPLAN_API_KEY` | sim | chave de API |
 | `ONEPLAN_KEY_NAME` | sim | nome da chave; vai junto no Basic auth |
 | `ONEPLAN_BASE_URL` | não | padrão `https://mygraph.oneplan.ai` |
-| `ONEPLAN_SESSION_COOKIE` | não | cookie do navegador; habilita rotas que a chave sozinha não alcança |
+| `ONEPLAN_SESSION_COOKIE` | não | cookie de sessão do navegador; veja abaixo |
 | `SP_SITE_URL` | não | ativa as ferramentas `sp_*` e `pwa_*` |
 | `SP_AUTH_METHOD` | não | `app` (padrão), `cookie` ou `basic` |
 | `SP_CLIENT_ID` · `SP_CLIENT_SECRET` · `SP_TENANT_ID` | não | aplicativo do Azure AD, quando o método é `app` |
+
+Não existe variável de e-mail e senha. Conta que entra pela Microsoft (SSO) não tem senha no
+OnePlan, e o servidor não faz login sozinho.
+
+### O cookie de sessão
+
+**A leitura não precisa dele**: todas as ferramentas de consulta, inclusive o financeiro,
+funcionam só com a chave. Quando o cookie existe, as ferramentas que gravam no Gantt, na grade de
+custos, na hierarquia e nos campos passam a usá-lo no lugar da chave. Três cuidados:
+
+- **Identidade:** com o cookie, o que o servidor grava fica registrado em nome da pessoa dona da
+  sessão, não da chave.
+- **Validade:** ele expira quando a sessão do navegador expira. Quando as gravações começarem a
+  falhar com 401 ou 403, copie de novo.
+- **Segredo:** o cookie dá acesso à conta, como uma senha. Não mande para ninguém.
+
+Para copiar (Edge ou Chrome):
+
+1. Entre no OnePlan pelo navegador, pela Microsoft mesmo.
+2. Aperte **F12**, abra a aba **Network (Rede)**, digite `api` no filtro e recarregue (**F5**).
+3. Clique numa das linhas. A coluna *Name* mostra só o final do endereço, mas o filtro já garante
+   que é uma chamada `/api/`.
+4. Em **Headers › Request Headers**, clique com o botão direito no valor de `Cookie` e escolha
+   **Copy value**.
+5. Cole no `.env`, entre aspas, e reinicie o servidor (`/mcp` › Reconnect no Claude Code):
+   `ONEPLAN_SESSION_COOKIE="..."`
 
 ## Desenvolvimento
 
